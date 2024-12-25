@@ -1,0 +1,248 @@
+//+------------------------------------------------------------------+
+//|                                               EA_Tendencia.mq5   |
+//|                                  Copyright 2024, MetaQuotes Ltd. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#include <Trade/Trade.mqh>
+CTrade m_trade;
+
+input int candlesParaAnalise = 160;       // Quantidade de candles para análise da tendência
+input ENUM_TIMEFRAMES timeFrameInput = PERIOD_M1; // Tempo gráfico (1 minuto)
+input double lotSize = 10.0;               // Tamanho do lote
+input int blockTimeMinutes = 90;          // Tempo em minutos para bloquear novas ordens após a última ordem
+input double riskRewardRatio = 2.0;       // Relação take profit/stop loss
+input int monitorTimeMinutes = 30;        // Tempo em minutos para monitorar o preço após cruzamento
+
+datetime lastOrderTime = 0;               // Variável para armazenar o tempo da última ordem
+datetime lastTrendMessageTime = 0;        // Variável para armazenar o tempo da última mensagem de tendência
+int candleCounter = 0;                    // Contador de candles
+datetime monitorStartTime = 0;            // Variável para armazenar o tempo de início do monitoramento
+bool isMonitoring = false;                // Variável para indicar se está monitorando o preço
+double entryPrice = 0;                    // Variável para armazenar o preço de entrada da ordem
+bool isBuyOrder = false;                  // Variável para indicar se a ordem é de compra
+
+double CalcularEMA(int period, ENUM_TIMEFRAMES timeFrame, int shift) {
+    double alpha = 2.0 / (period + 1);
+    double ema = iClose(_Symbol, timeFrame, period + shift - 1); // Inicializa com o preço de fechamento do período anterior
+
+    for (int i = period + shift - 2; i >= shift; i--) {
+        double closePrice = iClose(_Symbol, timeFrame, i);
+        ema = alpha * closePrice + (1 - alpha) * ema;
+    }
+    return ema;
+}
+
+
+
+double MaximaUltimosCandles(int candles) {
+    double maxima = iHigh(_Symbol, timeFrameInput, 0);
+    for (int i = 1; i < candles; i++) {
+        double high = iHigh(_Symbol, timeFrameInput, i);
+        if (high > maxima) {
+            maxima = high;
+        }
+    }
+    return maxima;
+}
+
+double MinimaUltimosCandles(int candles) {
+    double minima = iLow(_Symbol, timeFrameInput, 0);
+    for (int i = 1; i < candles; i++) {
+        double low = iLow(_Symbol, timeFrameInput, i);
+        if (low < minima) {
+            minima = low;
+        }
+    }
+    return minima;
+}
+
+
+bool VerificarTendenciaBaixa() {
+    double emaAtual = CalcularEMA(candlesParaAnalise, timeFrameInput, 0);
+    double emaAnterior = CalcularEMA(candlesParaAnalise, timeFrameInput, 1);
+    return (emaAtual < emaAnterior) && (CalcularEstocastico() == "sobrecomprado");
+}
+
+bool VerificarTendenciaAlta() {
+    double emaAtual = CalcularEMA(candlesParaAnalise, timeFrameInput, 0);
+    double emaAnterior = CalcularEMA(candlesParaAnalise, timeFrameInput, 1);
+    return (emaAtual > emaAnterior) && (CalcularEstocastico() == "sobrevendido");
+}
+
+
+string CalcularEstocastico() {
+    double k = iStochastic(_Symbol, PERIOD_D1, 5, 3, 3, MODE_SMA, 0, PRICE_LOW_HIGH, MODE_MAIN, 0);
+    double d = iStochastic(_Symbol, PERIOD_D1, 5, 3, 3, MODE_SMA, 0, PRICE_LOW_HIGH, MODE_SIGNAL, 0);
+
+    if (k <= 30 && d <= 30) {
+        return "sobrevendido";
+    } else if (k >= 70 && d >= 70) {
+        return "sobrecomprado";
+    } else {
+        return "neutro";
+    }
+}
+
+
+void AbrirOrdemVenda() {
+    entryPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID); // Preço de entrada (Bid)
+    if (entryPrice == 0) {
+        Print("Erro ao obter o preço Bid");
+        return;
+    }
+
+    // Stop loss na máxima dos últimos 160 candles
+    double stopLossPrice = MaximaUltimosCandles(candlesParaAnalise);
+
+    // Take profit com relação 2:1
+    double takeProfitPrice = entryPrice - riskRewardRatio * (stopLossPrice - entryPrice);
+
+    // Abrir a ordem de venda a mercado
+    if (m_trade.Sell(lotSize, _Symbol, entryPrice, stopLossPrice, takeProfitPrice, "Ordem de Venda")) {
+        Print("Ordem de Venda aberta com Stop Loss em: ", stopLossPrice, " e Take Profit em: ", takeProfitPrice);
+        lastOrderTime = TimeCurrent(); // Atualizar o tempo da última ordem
+        isBuyOrder = false; // Indicar que a ordem é de venda
+        isMonitoring = true; // Iniciar monitoramento
+        monitorStartTime = TimeCurrent(); // Armazenar o tempo de início do monitoramento
+        EventSetTimer(60); // Configurar o timer para verificar a cada minuto
+    } else {
+        Print("Falha ao abrir Ordem de Venda: ", GetLastError());
+    }
+}
+
+
+void AbrirOrdemCompra() {
+    entryPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK); // Preço de entrada (Ask)
+    if (entryPrice == 0) {
+        Print("Erro ao obter o preço Ask");
+        return;
+    }
+
+    // Stop loss na mínima dos últimos 160 candles
+    double stopLossPrice = MinimaUltimosCandles(candlesParaAnalise);
+
+    // Take profit com relação 2:1
+    double takeProfitPrice = entryPrice + riskRewardRatio * (entryPrice - stopLossPrice);
+
+    // Abrir a ordem de compra a mercado
+    if (m_trade.Buy(lotSize, _Symbol, entryPrice, stopLossPrice, takeProfitPrice, "Ordem de Compra")) {
+        Print("Ordem de Compra aberta com Stop Loss em: ", stopLossPrice, " e Take Profit em: ", takeProfitPrice);
+        lastOrderTime = TimeCurrent(); // Atualizar o tempo da última ordem
+        isBuyOrder = true; // Indicar que a ordem é de compra
+        isMonitoring = true; // Iniciar monitoramento
+        monitorStartTime = TimeCurrent(); // Armazenar o tempo de início do monitoramento
+        EventSetTimer(60); // Configurar o timer para verificar a cada minuto
+    } else {
+        Print("Falha ao abrir Ordem de Compra: ", GetLastError());
+    }
+}
+
+void OnTick() {
+    // Incrementar o contador de candles
+    candleCounter++;
+
+    // Verificar se o tempo de bloqueio já passou
+    if (TimeCurrent() - lastOrderTime < blockTimeMinutes * 60) {
+        return; // Ainda está no período de bloqueio
+    }
+
+    // Contar o número de posições abertas
+    int totalPositions = 0;
+    for (int i = 0; i < PositionsTotal(); i++) {
+        if (PositionGetSymbol(i) == _Symbol) {
+            totalPositions++;
+        }
+    }
+
+    // Bloquear novas ordens se já houver 2 posições abertas
+    if (totalPositions >= 2) {
+        return;
+    }
+
+    // Verificar se é hora de refazer a análise de tendência
+    if (candleCounter >= candlesParaAnalise) {
+        candleCounter = 0; // Resetar o contador de candles
+
+        // Verificar tendência de baixa
+        if (VerificarTendenciaBaixa() && TimeCurrent() - lastTrendMessageTime >= blockTimeMinutes * 60) {
+            Print("Tendência de Baixa");
+            lastTrendMessageTime = TimeCurrent();
+            Sleep(blockTimeMinutes * 60 * 1000); // Pausar por blockTimeMinutes
+        }
+
+        // Verificar tendência de alta
+        if (VerificarTendenciaAlta() && TimeCurrent() - lastTrendMessageTime >= blockTimeMinutes * 60) {
+            Print("Tendência de Alta");
+            lastTrendMessageTime = TimeCurrent();
+            Sleep(blockTimeMinutes * 60 * 1000); // Pausar por blockTimeMinutes
+        }
+    }
+
+    // Verificar cruzamento para abrir ordem de venda
+    double ema100 = CalcularEMA(100, timeFrameInput, 0);
+    double ema100Anterior = CalcularEMA(100, timeFrameInput, 1);
+    double highAtual = iHigh(_Symbol, timeFrameInput, 0);
+    double highAnterior = iHigh(_Symbol, timeFrameInput, 1);
+
+    if (ema100 < ema100Anterior && highAnterior > ema100 && highAtual < ema100) {
+        AbrirOrdemVenda();
+    }
+
+    // Verificar cruzamento para abrir ordem de compra
+    double lowAtual = iLow(_Symbol, timeFrameInput, 0);
+    double lowAnterior = iLow(_Symbol, timeFrameInput, 1);
+
+    if (ema100 > ema100Anterior && lowAnterior < ema100 && lowAtual > ema100) {
+        AbrirOrdemCompra();
+    }
+
+    // Monitorar o preço em relação ao preço de entrada da ordem
+    if (isMonitoring) {
+        double currentPrice = isBuyOrder ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+        if (isBuyOrder && currentPrice > entryPrice) {
+            // Preço acima do preço de entrada para ordem de compra
+            monitorStartTime = TimeCurrent(); // Resetar o tempo de monitoramento
+        } else if (!isBuyOrder && currentPrice < entryPrice) {
+            // Preço abaixo do preço de entrada para ordem de venda
+            monitorStartTime = TimeCurrent(); // Resetar o tempo de monitoramento
+        }
+    }
+}
+
+void OnTimer() {
+    if (isMonitoring) {
+        if (TimeCurrent() - monitorStartTime >= monitorTimeMinutes * 60) {
+            // Tempo de monitoramento excedido
+            for (int i = 0; i < PositionsTotal(); i++) {
+                if (PositionGetSymbol(i) == _Symbol) {
+                    ulong ticket = PositionGetInteger(POSITION_TICKET);
+                    m_trade.PositionClose(ticket); // Fechar a posição
+                    Print("Posição fechada após monitoramento de ", monitorTimeMinutes, " minutos.");
+                    isMonitoring = false; // Parar o monitoramento
+                    EventKillTimer(); // Desativar o timer
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void OnTrade() {
+    // Implementar lógica de trade, se necessário
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result) {
+    // Implementar lógica de transação de trade, se necessário
+}
+
+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam) {
+    // Implementar lógica de evento de gráfico, se necessário
+}
+
+
+
+
+
+
